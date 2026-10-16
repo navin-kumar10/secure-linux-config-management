@@ -2,50 +2,120 @@
 
 ![architecture](docs/architecture.png)
 
-**Ansible - Linux - NGINX** | *Phase 1 - Beginner foundations* | `lab` - verify before production use.
+**Ansible · Linux · NGINX** · *Phase 1 — Beginner foundations* · `lab`.
 
-> Ansible hardening: SSH, patching, NGINX+TLS, firewall, repeatable builds. Vagrant/Docker lab included.
+> Harden SSH, auto-patch, NGINX+TLS, UFW firewall. Idempotent roles, check-mode first, verify script. Works on local VM/Docker before any cloud.
 
-## Architecture
+## Contents
+
+1. Outcomes 2. Architecture 3. Prerequisites 4. Repo map 5. Step 0 clone 6. Step 1 Ansible install + ping 7. Step 2 check mode 8. Step 3 apply roles 9. Step 4 NGINX+TLS verify 10. Step 5 patching + firewall drill 11. CI 12. Teardown 13. Troubleshooting
+
+## 1. Outcomes
+
+- `PermitRootLogin no`, key-only SSH, fail2ban-ready.
+- Unattended upgrades, NGINX reverse proxy + TLS stub, UFW allow 22/80/443 deny rest.
+- Repeatable: re-run same playbook = same state.
+
+## 2. Architecture
 
 ```mermaid
 flowchart LR
-  Control[Ansible] --> Roles[base-ssh-nginx-fw] --> Hosts
+  Control[Ansible control] --> Inv[Inventory dev/staging/prod]
+  Control --> Roles[Roles: base/ssh/nginx/firewall/patching]
+  Roles --> Hosts[Linux hosts]
+  Hosts --> Verify[Verify]
 ```
 
-Full diagram: [docs/architecture.png](docs/architecture.png) - Design: [docs/architecture.md](docs/architecture.md)
+## 3. Prerequisites
 
-## Structure
+- python3 + pip, ansible (`brew install ansible` / `pip3 install ansible`), ssh, ubuntu target (local VM, Droplet, EC2).
+- No cloud for dry-run: uses `localhost` via `infrastructure/inventory.ini`.
+
+## 4. Repository map
 
 ```
-.
-+-- app/
-+-- terraform/ or infrastructure/
-+-- monitoring/
-+-- tests/
-+-- runbooks/
-+-- docs/architecture.md, architecture.png, cost-estimate.md
-+-- .github/workflows/
+infrastructure/inventory.ini                  # [lab] localhost local
+infrastructure/site.yml                       # hosts lab, roles base/ssh/fw/nginx
+infrastructure/roles/ssh_hardening/tasks/main.yml
+infrastructure/roles/nginx/tasks/main.yml
+tests/smoke.sh | tests/verify.sh (if present)
 ```
 
-## Quickstart (lab)
+## Step 0 — Clone
 
 ```bash
 git clone https://github.com/navin-kumar10/secure-linux-config-management.git
 cd secure-linux-config-management
-make validate
-make plan
-make apply
-make smoke
-make destroy
+bash tests/smoke.sh
+cat infrastructure/inventory.ini infrastructure/site.yml
 ```
 
-See [runbooks/DEPLOYMENT.md](runbooks/DEPLOYMENT.md), [runbooks/ROLLBACK.md](runbooks/ROLLBACK.md), [docs/cost-estimate.md](docs/cost-estimate.md).
+## Step 1 — Install and ping
 
-## Implementation order
+```bash
+ansible --version
+ansible-inventory -i infrastructure/inventory.ini --list
+ansible lab -i infrastructure/inventory.ini -m ping
+# expected: localhost | SUCCESS => {"pong": true}
+```
 
-10-project portfolio. Order: Phase 1 (04,07,09) -> Phase 2 (03,04,05) -> Phase 3 (01) -> Phase 4 (02) -> Phase 5 (08,09,10).
+## Step 2 — Dry-run (check mode, always first)
 
-## License
+```bash
+ansible-playbook -i infrastructure/inventory.ini infrastructure/site.yml --check --diff
+# READ every change. No firewall lockout surprise: ensure port 22 allowed before enabling UFW.
+```
 
-MIT - see LICENSE.
+## Step 3 — Apply to lab
+
+```bash
+ansible-playbook -i infrastructure/inventory.ini infrastructure/site.yml
+# re-run to prove idempotence: second run should show changed=0
+ansible-playbook -i infrastructure/inventory.ini infrastructure/site.yml | tail -5
+```
+
+Real host example:
+
+```bash
+# inventory/prod.ini:
+# [prod]
+# 203.0.113.10 ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/lab.pem
+ansible-playbook -i infrastructure/prod.ini infrastructure/site.yml --check --diff
+ansible-playbook -i infrastructure/prod.ini infrastructure/site.yml
+```
+
+## Step 4 — Verify SSH + NGINX
+
+```bash
+sudo sshd -T | grep -i -E 'permitrootlogin|passwordauthentication'
+sudo ufw status numbered
+curl -sI http://localhost/ | head -5
+nginx -t 2>&1 | head -3 || true
+```
+
+TLS prod: add certbot role or `cert-manager` on K8s; test `curl -sI https://lab.example.com`.
+
+## Step 5 — Patching drill
+
+```bash
+ansible lab -i infrastructure/inventory.ini -m apt -a "update_cache=yes" --become
+# unattended-upgrades role enables auto-reboot window; schedule staging first, prod with approval
+```
+
+## CI
+
+- `ci.yml` hygiene + `ansible-lint` + `--check` on PR. Add `molecule test` for roles when extended.
+
+## Teardown
+
+Lab localhost: nothing to destroy (remove nginx if unwanted: `sudo apt remove -y nginx`). Cloud VM: `terraform destroy` or delete Droplet, revoke key.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `UNREACHABLE` | ssh key/user wrong | `-u ubuntu --private-key`, `ssh -i key ubuntu@host` test |
+| Locked out by UFW | 22 not allowed | console access, `ufw allow 22/tcp` before `ufw enable` |
+| `become` fail | no sudo | `--ask-become-pass` or NOPASSWD sudoers |
+
+Phase 1 core. MIT — LICENSE.
