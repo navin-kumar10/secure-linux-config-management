@@ -1,0 +1,3 @@
+- hosts: lab
+  become: true
+  roles: [base, ssh_hardening, firewall, nginx]
